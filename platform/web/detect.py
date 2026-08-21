@@ -48,6 +48,11 @@ def get_opts():
         BoolVariable("use_asan", "Use Emscripten address sanitizer (ASAN)", False),
         BoolVariable("use_lsan", "Use Emscripten leak sanitizer (LSAN)", False),
         BoolVariable("use_safe_heap", "Use Emscripten SAFE_HEAP sanitizer", False),
+        BoolVariable(
+            "wechat_glx",
+            "Link WeChat EmscriptenGLX native rendering support",
+            False,
+        ),
         # eval() can be a security concern, so it can be disabled.
         BoolVariable("javascript_eval", "Enable JavaScript eval interface", True),
         BoolVariable(
@@ -59,7 +64,11 @@ def get_opts():
             "Use Emscripten PROXY_TO_PTHREAD option to run the main application code to a separate thread",
             False,
         ),
-        BoolVariable("wasm_simd", "Use WebAssembly SIMD to improve CPU performance", True),
+        BoolVariable(
+            "wasm_simd",
+            "Use WebAssembly SIMD to improve CPU performance (may break older iOS WebKit in WeChat Mini Game)",
+            False,
+        ),
     ]
 
 
@@ -120,6 +129,26 @@ def configure(env: "SConsEnvironment"):
 
     env["EXPORTED_FUNCTIONS"] = ["_main"]
     env["EXPORTED_RUNTIME_METHODS"] = []
+
+    if env["wechat_glx"]:
+        # The bundled WeChat library is the official Emscripten 4.0.10 build.
+        if cc_semver != (4, 0, 10):
+            print_error(
+                "wechat_glx=yes requires Emscripten 4.0.10 for the bundled libemscriptenglx.a, detected: %s.%s.%s"
+                % cc_semver
+            )
+            sys.exit(255)
+
+        env.AppendUnique(LIBPATH=["#thirdparty/wechat-glx"], LIBS=["emscriptenglx"])
+        # Godot adds cwrap below; GLX also needs these runtime helpers exported.
+        env["EXPORTED_RUNTIME_METHODS"] += ["ccall", "stringToUTF8", "lengthBytesUTF8"]
+        env.Append(
+            LINKFLAGS=[
+                "-sERROR_ON_UNDEFINED_SYMBOLS=0",
+                "-sDISABLE_EXCEPTION_THROWING=0",
+                "-sDISABLE_EXCEPTION_CATCHING=0",
+            ]
+        )
 
     # Validate arch.
     supported_arches = ["wasm32"]
@@ -295,7 +324,8 @@ def configure(env: "SConsEnvironment"):
         env.Append(LINKFLAGS=["-fvisibility=hidden"])
         env.extra_suffix = ".dlink" + env.extra_suffix
 
-    env.Append(LINKFLAGS=["-sWASM_BIGINT"])
+    # WeChat Mini Game: Disable WASM_BIGINT as WeChat doesn't support BigInt
+    # env.Append(LINKFLAGS=["-sWASM_BIGINT"])
 
     # Run the main application in a web worker
     if env["proxy_to_pthread"]:
@@ -315,9 +345,10 @@ def configure(env: "SConsEnvironment"):
     # Wrap the JavaScript support code around a closure named Godot.
     env.Append(LINKFLAGS=["-sMODULARIZE=1", "-sEXPORT_NAME='Godot'"])
 
-    # Force long jump mode to 'wasm'
-    env.Append(CCFLAGS=["-sSUPPORT_LONGJMP='wasm'"])
-    env.Append(LINKFLAGS=["-sSUPPORT_LONGJMP='wasm'"])
+    # GLX uses Emscripten exception glue, which is incompatible with Wasm SjLj.
+    longjmp_mode = "emscripten" if env["wechat_glx"] else "wasm"
+    env.Append(CCFLAGS=[f"-sSUPPORT_LONGJMP='{longjmp_mode}'"])
+    env.Append(LINKFLAGS=[f"-sSUPPORT_LONGJMP='{longjmp_mode}'"])
 
     # Allow increasing memory buffer size during runtime. This is efficient
     # when using WebAssembly (in comparison to asm.js) and works well for

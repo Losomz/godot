@@ -139,14 +139,21 @@ def configure(env: "SConsEnvironment"):
             )
             sys.exit(255)
 
+        if env["disable_exceptions"]:
+            print_warning("wechat_glx=yes requires C++ exception support; forcing disable_exceptions=no.")
+            env["disable_exceptions"] = False
+
+        # The vendor GLX library throws C++ exceptions internally.
+        env.Append(CXXFLAGS=["-fexceptions"])
+        env.Append(LINKFLAGS=["-fexceptions"])
+        env.AppendUnique(CPPDEFINES=["WECHAT_GLX_EXPERIMENTAL"])
         env.AppendUnique(LIBPATH=["#thirdparty/wechat-glx"], LIBS=["emscriptenglx"])
         # Godot adds cwrap below; GLX also needs these runtime helpers exported.
         env["EXPORTED_RUNTIME_METHODS"] += ["ccall", "stringToUTF8", "lengthBytesUTF8"]
         env.Append(
             LINKFLAGS=[
+                "-sCHECK_NULL_WRITES=0",
                 "-sERROR_ON_UNDEFINED_SYMBOLS=0",
-                "-sDISABLE_EXCEPTION_THROWING=0",
-                "-sDISABLE_EXCEPTION_CATCHING=0",
             ]
         )
 
@@ -280,8 +287,9 @@ def configure(env: "SConsEnvironment"):
         env.AppendUnique(CPPDEFINES=["GLES3_ENABLED"])
         # This setting just makes WebGL 2 APIs available, it does NOT disable WebGL 1.
         env.Append(LINKFLAGS=["-sMAX_WEBGL_VERSION=2"])
-        # Allow use to take control of swapping WebGL buffers.
-        env.Append(LINKFLAGS=["-sOFFSCREEN_FRAMEBUFFER=1"])
+        # Allow use to take control of swapping WebGL buffers in the regular WebGL path.
+        if not env["wechat_glx"]:
+            env.Append(LINKFLAGS=["-sOFFSCREEN_FRAMEBUFFER=1"])
         # Disables the use of *glGetProcAddress() which is inefficient.
         # See https://emscripten.org/docs/tools_reference/settings_reference.html#gl-enable-get-proc-address
         env.Append(LINKFLAGS=["-sGL_ENABLE_GET_PROC_ADDRESS=0"])

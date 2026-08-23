@@ -53,6 +53,12 @@ def get_opts():
             "Link WeChat EmscriptenGLX native rendering support",
             False,
         ),
+        BoolVariable(
+            "wechat_glx_exceptions",
+            "Keep C++ exceptions enabled for WeChat GLX (vendor libemscriptenglx.a throws internally). "
+            "Disable to save ~1.14 MiB Brotli WASM at the cost of aborting if the GLX library throws.",
+            True,
+        ),
         # eval() can be a security concern, so it can be disabled.
         BoolVariable("javascript_eval", "Enable JavaScript eval interface", True),
         BoolVariable(
@@ -139,13 +145,14 @@ def configure(env: "SConsEnvironment"):
             )
             sys.exit(255)
 
-        if env["disable_exceptions"]:
-            print_warning("wechat_glx=yes requires C++ exception support; forcing disable_exceptions=no.")
-            env["disable_exceptions"] = False
+        if env["wechat_glx_exceptions"]:
+            if env["disable_exceptions"]:
+                print_warning("wechat_glx=yes with wechat_glx_exceptions=yes requires C++ exception support; forcing disable_exceptions=no.")
+                env["disable_exceptions"] = False
 
-        # The vendor GLX library throws C++ exceptions internally.
-        env.Append(CXXFLAGS=["-fexceptions"])
-        env.Append(LINKFLAGS=["-fexceptions"])
+            # The vendor GLX library throws C++ exceptions internally.
+            env.Append(CXXFLAGS=["-fexceptions"])
+            env.Append(LINKFLAGS=["-fexceptions"])
         env.AppendUnique(CPPDEFINES=["WECHAT_GLX_EXPERIMENTAL"])
         env.AppendUnique(LIBPATH=["#thirdparty/wechat-glx"], LIBS=["emscriptenglx"])
         # Godot adds cwrap below; GLX also needs these runtime helpers exported.

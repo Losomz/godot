@@ -1658,9 +1658,170 @@ void RendererCanvasCull::canvas_item_add_texture_rect_region(RID p_item, const R
 	}
 }
 
+#ifdef WEB_ENABLED
+namespace {
+
+struct NinePatchAxisSegment {
+	float dst_begin = 0.0f;
+	float dst_end = 0.0f;
+	float uv_begin = 0.0f; // In region (source) texture pixel coordinates.
+	float uv_end = 0.0f;
+	bool is_middle = false;
+};
+
+// Splits one axis of a nine-patch into the linear pieces that the USE_NINEPATCH
+// specialization of the GLES3 canvas shader (canvas.glsl map_ninepatch_axis)
+// would render, so a whole nine-patch can be emitted as regular textured rect
+// commands. WeChat's GLX command replay fails to handle that shader
+// specialization on some devices (its batches are silently skipped), so on Web
+// nine-patches are expanded on the CPU instead.
+// Negative margins are undefined in the shader and are clamped here.
+void _ninepatch_axis_segments(float p_draw_size, float p_margin_begin, float p_margin_end, float p_region_size, RS::NinePatchAxisMode p_mode, NinePatchAxisSegment *r_segments, int &r_count) {
+	const float draw_size = MAX(0.0f, p_draw_size);
+	const float margin_begin = MAX(0.0f, p_margin_begin);
+	const float margin_end = MAX(0.0f, p_margin_end);
+	r_count = 0;
+
+	// [0, margin_begin): 1:1 from the region start (shader branch `pixel < margin_begin`).
+	const float start_end = MIN(margin_begin, draw_size);
+	if (start_end > CMP_EPSILON) {
+		r_segments[r_count].dst_begin = 0.0f;
+		r_segments[r_count].dst_end = start_end;
+		r_segments[r_count].uv_begin = 0.0f;
+		r_segments[r_count].uv_end = start_end;
+		r_segments[r_count].is_middle = false;
+		r_count++;
+	}
+
+	// The middle and end branches only apply from margin_begin onwards.
+	const float middle_begin = margin_begin;
+	const float middle_end = draw_size - margin_end;
+	if (middle_begin < middle_end) {
+		const float middle_dst = middle_end - middle_begin;
+		const float middle_src = p_region_size - margin_begin - margin_end;
+		bool middle_done = false;
+		switch (p_mode) {
+			case RS::NINE_PATCH_TILE:
+			case RS::NINE_PATCH_TILE_FIT: {
+				if (middle_src <= CMP_EPSILON) {
+					break; // Degenerate region middle; fall back to stretch.
+				}
+				if (p_mode == RS::NINE_PATCH_TILE) {
+					if (middle_dst / middle_src > 64.0f) {
+						break; // Unrealistically many tiles; fall back to stretch.
+					}
+					int tiles = MAX(1, int(Math::ceil(middle_dst / middle_src)));
+					// Tiles are sampled 1:1; the last one is clipped.
+					float piece_begin = middle_begin;
+					for (int i = 0; i < tiles; i++) {
+						float piece_end = MIN(piece_begin + middle_src, middle_end);
+						r_segments[r_count].dst_begin = piece_begin;
+						r_segments[r_count].dst_end = piece_end;
+						r_segments[r_count].uv_begin = margin_begin;
+						r_segments[r_count].uv_end = margin_begin + (piece_end - piece_begin);
+						r_segments[r_count].is_middle = true;
+						r_count++;
+						piece_begin = piece_end;
+					}
+				} else {
+					if (middle_dst / middle_src > 64.0f) {
+						break; // Scale too large; fall back to stretch.
+					}
+					// Tile Fit: whole region middles scaled by an integer factor.
+					int tiles = MAX(1, int(Math::floor(middle_dst / middle_src + 0.5f)));
+					float piece_size = middle_dst / tiles;
+					for (int i = 0; i < tiles; i++) {
+						float piece_begin = middle_begin + i * piece_size;
+						r_segments[r_count].dst_begin = piece_begin;
+						r_segments[r_count].dst_end = piece_begin + piece_size;
+						r_segments[r_count].uv_begin = margin_begin;
+						r_segments[r_count].uv_end = margin_begin + middle_src;
+						r_segments[r_count].is_middle = true;
+						r_count++;
+					}
+				}
+				middle_done = true;
+			} break;
+			case RS::NINE_PATCH_STRETCH:
+			default:
+				break;
+		}
+		if (!middle_done) {
+			// Stretch: linear map of the middle onto the region middle. A region
+			// middle smaller than the margins produces a reversed (negative size)
+			// mapping, which the rect command reproduces via its flip flags.
+			r_segments[r_count].dst_begin = middle_begin;
+			r_segments[r_count].dst_end = middle_end;
+			r_segments[r_count].uv_begin = margin_begin;
+			r_segments[r_count].uv_end = margin_begin + middle_src;
+			r_segments[r_count].is_middle = true;
+			r_count++;
+		}
+	}
+
+	// [draw_size - margin_end, draw_size): reversed 1:1 from the region end
+	// (shader branch `pixel >= draw_size - margin_end`).
+	const float end_begin = MAX(middle_end, start_end);
+	if (end_begin < draw_size - CMP_EPSILON) {
+		r_segments[r_count].dst_begin = end_begin;
+		r_segments[r_count].dst_end = draw_size;
+		r_segments[r_count].uv_begin = p_region_size - (draw_size - end_begin);
+		r_segments[r_count].uv_end = p_region_size;
+		r_segments[r_count].is_middle = false;
+		r_count++;
+	}
+}
+
+} // namespace
+#endif // WEB_ENABLED
+
 void RendererCanvasCull::canvas_item_add_nine_patch(RID p_item, const Rect2 &p_rect, const Rect2 &p_source, RID p_texture, const Vector2 &p_topleft, const Vector2 &p_bottomright, RS::NinePatchAxisMode p_x_axis_mode, RS::NinePatchAxisMode p_y_axis_mode, bool p_draw_center, const Color &p_modulate) {
 	Item *canvas_item = canvas_item_owner.get_or_null(p_item);
 	ERR_FAIL_NULL(canvas_item);
+
+#ifdef WEB_ENABLED
+	// Expand the nine-patch into regular textured rect commands (see
+	// _ninepatch_axis_segments): the USE_NINEPATCH shader specialization is
+	// never compiled or executed on Web.
+	if (p_rect.size.x <= 0.0f || p_rect.size.y <= 0.0f) {
+		return; // The shader maps non-positive sizes in undefined ways; callers use positive ones.
+	}
+
+	Size2 region_size;
+	Size2 region_offset;
+	if (p_source != Rect2()) {
+		region_size = p_source.size;
+		region_offset = p_source.position;
+	} else {
+		// The shader maps the whole texture; a null texture RID falls back to
+		// the 1x1 white texture, matching _prepare_canvas_texture.
+		region_size = p_texture.is_valid() ? RSG::texture_storage->texture_size_with_proxy(p_texture) : Size2(1, 1);
+		if (region_size.x <= 0 || region_size.y <= 0) {
+			region_size = Size2(1, 1);
+		}
+	}
+
+	NinePatchAxisSegment x_segments[66];
+	NinePatchAxisSegment y_segments[66];
+	int x_count = 0;
+	int y_count = 0;
+	_ninepatch_axis_segments(p_rect.size.x, p_topleft.x, p_bottomright.x, region_size.x, p_x_axis_mode, x_segments, x_count);
+	_ninepatch_axis_segments(p_rect.size.y, p_topleft.y, p_bottomright.y, region_size.y, p_y_axis_mode, y_segments, y_count);
+
+	for (int y = 0; y < y_count; y++) {
+		const NinePatchAxisSegment &ys = y_segments[y];
+		for (int x = 0; x < x_count; x++) {
+			const NinePatchAxisSegment &xs = x_segments[x];
+			if (!p_draw_center && xs.is_middle && ys.is_middle) {
+				continue;
+			}
+			Rect2 dst_rect(p_rect.position.x + xs.dst_begin, p_rect.position.y + ys.dst_begin, xs.dst_end - xs.dst_begin, ys.dst_end - ys.dst_begin);
+			Rect2 src_rect(region_offset.x + xs.uv_begin, region_offset.y + ys.uv_begin, xs.uv_end - xs.uv_begin, ys.uv_end - ys.uv_begin);
+			canvas_item_add_texture_rect_region(p_item, dst_rect, p_texture, src_rect, p_modulate, false, false);
+		}
+	}
+	return;
+#endif
 
 	Item::CommandNinePatch *style = canvas_item->alloc_command<Item::CommandNinePatch>();
 	ERR_FAIL_NULL(style);

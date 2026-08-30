@@ -55,8 +55,8 @@ def get_opts():
         ),
         BoolVariable(
             "wechat_glx_exceptions",
-            "Keep C++ exceptions enabled for WeChat GLX (vendor libemscriptenglx.a throws internally). "
-            "Disable to save ~1.14 MiB Brotli WASM at the cost of aborting if the GLX library throws.",
+            "Keep C++ exception support for WeChat GLX (the vendor libemscriptenglx.a throws internally). "
+            "Disable to drop engine exception tables (~1.14 MiB Brotli WASM); the runtime stays linked.",
             True,
         ),
         # eval() can be a security concern, so it can be disabled.
@@ -152,6 +152,12 @@ def configure(env: "SConsEnvironment"):
 
             # The vendor GLX library throws C++ exceptions internally.
             env.Append(CXXFLAGS=["-fexceptions"])
+            env.Append(LINKFLAGS=["-fexceptions"])
+        else:
+            # Engine code stays compiled with -fno-exceptions (no exception
+            # tables or landing pads), but the exception runtime is still
+            # linked so the vendor GLX library can throw and catch internally.
+            # An exception escaping into engine frames still aborts.
             env.Append(LINKFLAGS=["-fexceptions"])
         env.AppendUnique(CPPDEFINES=["WECHAT_GLX_EXPERIMENTAL"])
         env.AppendUnique(LIBPATH=["#thirdparty/wechat-glx"], LIBS=["emscriptenglx"])

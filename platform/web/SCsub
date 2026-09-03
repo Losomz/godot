@@ -65,11 +65,18 @@ sys_env.AddJSExterns(
     ]
 )
 
-sys_env.AddJSPost(
-    [
-        "js/patches/patch_em_gl.js",
-    ]
-)
+if env["wechat_glx"]:
+    sys_env.AddJSPost(
+        [
+            "js/patches/patch_em_gl.js",
+        ]
+    )
+else:
+    sys_env.AddJSPost(
+        [
+            "js/patches/patch_standard_em_gl.js",
+        ]
+    )
 
 if env["javascript_eval"]:
     sys_env.AddJSLibraries(["js/libs/library_godot_javascript_singleton.js"])
